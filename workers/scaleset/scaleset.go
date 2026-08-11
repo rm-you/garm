@@ -33,6 +33,7 @@ import (
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/runner/common"
 	garmUtil "github.com/cloudbase/garm/util"
+	"github.com/cloudbase/garm/util/github/scalesets"
 )
 
 func NewWorker(ctx context.Context, store dbCommon.Store, scaleSet params.ScaleSet, provider common.Provider) (*Worker, error) {
@@ -85,6 +86,35 @@ type Worker struct {
 	quit    chan struct{}
 }
 
+func (w *Worker) recordScaleSetID(entity params.ForgeEntity, scaleSetID int) error {
+	updateParams := params.UpdateScaleSetParams{
+		ScaleSetID: scaleSetID,
+	}
+	if _, err := w.store.UpdateEntityScaleSet(w.ctx, entity, w.scaleSet.ID, updateParams, nil); err != nil {
+		return fmt.Errorf("failed to update scale set: %w", err)
+	}
+
+	if err := w.SetLastMessageID(0); err != nil {
+		return fmt.Errorf("failed to reset last message id: %w", err)
+	}
+	w.scaleSet.ScaleSetID = scaleSetID
+	return nil
+}
+
+func (w *Worker) adoptScaleSet(entity params.ForgeEntity, scaleSet params.RunnerScaleSet) error {
+	if w.scaleSet.ScaleSetID == scaleSet.ID {
+		return nil
+	}
+	if w.scaleSet.ScaleSetID != 0 {
+		return runnerErrors.NewConflictError(
+			"scale set already exists in github and it differs from the ID we know (github: %d vs local: %d)",
+			scaleSet.ID,
+			w.scaleSet.ScaleSetID,
+		)
+	}
+	return w.recordScaleSetID(entity, scaleSet.ID)
+}
+
 func (w *Worker) ensureScaleSetInGitHub() error {
 	entity, err := w.scaleSet.GetEntity()
 	if err != nil {
@@ -106,15 +136,7 @@ func (w *Worker) ensureScaleSetInGitHub() error {
 	}
 	scaleSet, err := cli.GetRunnerScaleSetByNameAndRunnerGroup(w.ctx, int(rgID), w.scaleSet.Name)
 	if err == nil {
-		// The scale set exists
-		if scaleSet.ID != w.scaleSet.ScaleSetID {
-			// The scale set exists in github, but the ID differs from what we know to be true.
-			// It is possible that the scale set is being managed by some other auto scaler.
-			// We error here, as there is no way to listen on a scale set that already has a listener
-			// or is being managed by something else.
-			return fmt.Errorf("scale set already exists in github and it differs from the ID we know (github: %d vs local: %d)", scaleSet.ID, w.scaleSet.ScaleSetID)
-		}
-		return nil
+		return w.adoptScaleSet(entity, scaleSet)
 	}
 	if !errors.Is(err, runnerErrors.ErrNotFound) {
 		return fmt.Errorf("failed to get scale set: %w", err)
@@ -134,25 +156,15 @@ func (w *Worker) ensureScaleSetInGitHub() error {
 	}
 	runnerScaleSet, err := cli.CreateRunnerScaleSet(w.ctx, createScaleSetParams)
 	if err != nil {
+		if errors.Is(err, scalesets.ErrRunnerScaleSetExists) {
+			existingScaleSet, lookupErr := cli.GetRunnerScaleSetByNameAndRunnerGroup(w.ctx, int(rgID), w.scaleSet.Name)
+			if lookupErr == nil {
+				return w.adoptScaleSet(entity, existingScaleSet)
+			}
+		}
 		return fmt.Errorf("error creating runner scale set: %w", err)
 	}
-
-	// update the DB scale set
-	updateParams := params.UpdateScaleSetParams{
-		ScaleSetID: runnerScaleSet.ID,
-	}
-	_, err = w.store.UpdateEntityScaleSet(w.ctx, entity, w.scaleSet.ID, updateParams, nil)
-	if err != nil {
-		return fmt.Errorf("failed to update scale set: %w", err)
-	}
-
-	// The scale set was recreated. We need to reset the last message ID we recorded previously.
-	if err := w.SetLastMessageID(0); err != nil {
-		return fmt.Errorf("failed to reset last message id: %w", err)
-	}
-	w.scaleSet.ScaleSetID = runnerScaleSet.ID
-
-	return nil
+	return w.recordScaleSetID(entity, runnerScaleSet.ID)
 }
 
 func (w *Worker) Stop() error {

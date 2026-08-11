@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm/params"
@@ -29,6 +31,10 @@ const (
 	runnerEndpoint   = "_apis/distributedtask/pools/0/agents"
 	scaleSetEndpoint = "_apis/runtime/runnerscalesets"
 )
+
+func matchesRunnerScaleSet(scaleSet params.RunnerScaleSet, runnerGroupID int, name string) bool {
+	return scaleSet.Name == name && (scaleSet.RunnerGroupID == 0 || scaleSet.RunnerGroupID == int64(runnerGroupID))
+}
 
 const (
 	HeaderActionsActivityID = "ActivityId"
@@ -43,7 +49,11 @@ func (s *ScaleSetClient) GetRunnerScaleSetByNameAndRunnerGroup(ctx context.Conte
 		}
 	}()
 
-	path := fmt.Sprintf("%s?runnerGroupId=%d&name=%s", scaleSetEndpoint, runnerGroupID, name)
+	query := url.Values{
+		"runnerGroupId": []string{strconv.Itoa(runnerGroupID)},
+		"name":          []string{name},
+	}
+	path := scaleSetEndpoint + "?" + query.Encode()
 	req, err := s.newActionsRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return params.RunnerScaleSet{}, err
@@ -55,17 +65,44 @@ func (s *ScaleSetClient) GetRunnerScaleSetByNameAndRunnerGroup(ctx context.Conte
 	}
 	defer resp.Body.Close()
 
-	var runnerScaleSetList *params.RunnerScaleSetsResponse
+	var runnerScaleSetList params.RunnerScaleSetsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&runnerScaleSetList); err != nil {
 		return params.RunnerScaleSet{}, fmt.Errorf("failed to decode response: %w", err)
 	}
-	if runnerScaleSetList.Count == 0 {
-		return params.RunnerScaleSet{}, runnerErrors.NewNotFoundError("runner scale set with name %s and runner group ID %d was not found", name, runnerGroupID)
-	}
 
-	// Runner scale sets must have a uniqe name. Attempting to create a runner scale set with the same name as
-	// an existing scale set will result in a Bad Request (400) error.
-	return runnerScaleSetList.RunnerScaleSets[0], nil
+	switch runnerScaleSetList.Count {
+	case 0:
+		allScaleSets, err := s.ListRunnerScaleSets(ctx, runnerGroupID)
+		if err != nil {
+			return params.RunnerScaleSet{}, fmt.Errorf("failed to list runner scale sets: %w", err)
+		}
+		var matchingScaleSet params.RunnerScaleSet
+		matches := 0
+		for _, scaleSet := range allScaleSets.RunnerScaleSets {
+			if matchesRunnerScaleSet(scaleSet, runnerGroupID, name) {
+				matchingScaleSet = scaleSet
+				matches++
+			}
+		}
+		if matches == 1 {
+			return matchingScaleSet, nil
+		}
+		if matches > 1 {
+			return params.RunnerScaleSet{}, runnerErrors.NewConflictError("multiple runner scale sets exist with name %s and runner group ID %d", name, runnerGroupID)
+		}
+		return params.RunnerScaleSet{}, runnerErrors.NewNotFoundError("runner scale set with name %s and runner group ID %d was not found", name, runnerGroupID)
+	case 1:
+		if len(runnerScaleSetList.RunnerScaleSets) != 1 {
+			return params.RunnerScaleSet{}, fmt.Errorf("runner scale set response count does not match its values")
+		}
+		scaleSet := runnerScaleSetList.RunnerScaleSets[0]
+		if !matchesRunnerScaleSet(scaleSet, runnerGroupID, name) {
+			return params.RunnerScaleSet{}, fmt.Errorf("runner scale set response does not match the requested name and runner group")
+		}
+		return scaleSet, nil
+	default:
+		return params.RunnerScaleSet{}, runnerErrors.NewConflictError("multiple runner scale sets exist with name %s and runner group ID %d", name, runnerGroupID)
+	}
 }
 
 func (s *ScaleSetClient) GetRunnerScaleSetByID(ctx context.Context, runnerScaleSetID int) (_ params.RunnerScaleSet, err error) {
@@ -95,8 +132,8 @@ func (s *ScaleSetClient) GetRunnerScaleSetByID(ctx context.Context, runnerScaleS
 	return runnerScaleSet, nil
 }
 
-// ListRunnerScaleSets lists all runner scale sets in a github entity.
-func (s *ScaleSetClient) ListRunnerScaleSets(ctx context.Context) (_ *params.RunnerScaleSetsResponse, err error) {
+// ListRunnerScaleSets lists all runner scale sets in a runner group.
+func (s *ScaleSetClient) ListRunnerScaleSets(ctx context.Context, runnerGroupID int) (_ *params.RunnerScaleSetsResponse, err error) {
 	s.recordOperation("ListRunnerScaleSets")
 	defer func() {
 		if err != nil {
@@ -104,7 +141,11 @@ func (s *ScaleSetClient) ListRunnerScaleSets(ctx context.Context) (_ *params.Run
 		}
 	}()
 
-	req, err := s.newActionsRequest(ctx, http.MethodGet, scaleSetEndpoint, nil)
+	query := url.Values{
+		"runnerGroupId": []string{strconv.Itoa(runnerGroupID)},
+	}
+	path := scaleSetEndpoint + "?" + query.Encode()
+	req, err := s.newActionsRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
