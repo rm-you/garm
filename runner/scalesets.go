@@ -261,13 +261,29 @@ func (r *Runner) CreateEntityScaleSet(ctx context.Context, entityType params.For
 		Enabled: &param.Enabled,
 	}
 
-	runnerScaleSet, err := scalesetCli.CreateRunnerScaleSet(ctx, createParam)
-	if err != nil {
-		return params.ScaleSet{}, fmt.Errorf("error creating runner scale set: %w", err)
+	runnerScaleSet, lookupErr := scalesetCli.GetRunnerScaleSetByNameAndRunnerGroup(ctx, int(runnerGroupID), param.Name)
+	created := false
+	if lookupErr != nil {
+		if !errors.Is(lookupErr, runnerErrors.ErrNotFound) {
+			return params.ScaleSet{}, fmt.Errorf("error finding runner scale set: %w", lookupErr)
+		}
+
+		runnerScaleSet, err = scalesetCli.CreateRunnerScaleSet(ctx, createParam)
+		if err != nil {
+			if !errors.Is(err, scalesets.ErrRunnerScaleSetExists) {
+				return params.ScaleSet{}, fmt.Errorf("error creating runner scale set: %w", err)
+			}
+			runnerScaleSet, err = scalesetCli.GetRunnerScaleSetByNameAndRunnerGroup(ctx, int(runnerGroupID), param.Name)
+			if err != nil {
+				return params.ScaleSet{}, fmt.Errorf("error finding existing runner scale set: %w", err)
+			}
+		} else {
+			created = true
+		}
 	}
 
 	defer func() {
-		if err != nil {
+		if err != nil && created {
 			if innerErr := scalesetCli.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); innerErr != nil {
 				slog.With(slog.Any("error", innerErr)).ErrorContext(ctx, "failed to cleanup scale set")
 			}

@@ -15,9 +15,13 @@
 package scalesets
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +45,47 @@ const requestTimeout = 60 * time.Second
 // black-holed connection cannot hold a poll open forever. GitHub's own
 // runner polls the same broker with a 100 second client timeout.
 const longPollRequestTimeout = 100 * time.Second
+// ErrRunnerScaleSetExists is returned when creating an existing runner scale set.
+var ErrRunnerScaleSetExists = errors.New("runner scale set already exists")
+
+type actionsErrorResponse struct {
+	TypeName string `json:"typeName"`
+	Details  string `json:"details"`
+}
+
+func isRunnerScaleSetExistsType(typeName string) bool {
+	typeName, _, _ = strings.Cut(typeName, ",")
+	typeName = strings.TrimSpace(typeName)
+	if index := strings.LastIndexByte(typeName, '.'); index >= 0 {
+		typeName = typeName[index+1:]
+	}
+	return typeName == "RunnerScaleSetExistsException"
+}
+
+func isRunnerScaleSetExists(body []byte) bool {
+	var response actionsErrorResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return false
+	}
+	if isRunnerScaleSetExistsType(response.TypeName) {
+		return true
+	}
+
+	start := strings.IndexByte(response.Details, '{')
+	end := strings.LastIndexByte(response.Details, '}')
+	if start < 0 || end < start {
+		return false
+	}
+	details := response.Details[start : end+1]
+	var nestedResponse actionsErrorResponse
+	if err := json.Unmarshal([]byte(details), &nestedResponse); err != nil {
+		details, err = strconv.Unquote(`"` + details + `"`)
+		if err != nil || json.Unmarshal([]byte(details), &nestedResponse) != nil {
+			return false
+		}
+	}
+	return isRunnerScaleSetExistsType(nestedResponse.TypeName)
+}
 
 func NewClient(cli common.GithubClient) (*ScaleSetClient, error) {
 	// Use separate clients for regular API calls against the scaleset API
@@ -144,7 +189,11 @@ func (s *ScaleSetClient) doWithClient(client *http.Client, req *http.Request) (*
 	case 404:
 		return nil, runnerErrors.NewNotFoundError("resource %s not found: %q", req.URL.String(), string(body))
 	case 400:
-		return nil, runnerErrors.NewBadRequestError("bad request while calling %s: %q", req.URL.String(), string(body))
+		badRequest := runnerErrors.NewBadRequestError("bad request while calling %s: %q", req.URL.String(), string(body))
+		if isRunnerScaleSetExists(body) {
+			return nil, fmt.Errorf("%w: %w", ErrRunnerScaleSetExists, badRequest)
+		}
+		return nil, badRequest
 	case 409:
 		return nil, runnerErrors.NewConflictError("conflict while calling %s: %q", req.URL.String(), string(body))
 	case 401, 403:
