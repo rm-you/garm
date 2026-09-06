@@ -131,6 +131,9 @@ func (w *Worker) adoptScaleSet(entity params.ForgeEntity, scaleSet params.Runner
 			w.scaleSet.ScaleSetID,
 		)
 	}
+	if w.scaleSet.DisableUpdate != scaleSet.RunnerSetting.DisableUpdate {
+		return runnerErrors.NewConflictError("existing scale set %d has a different disable_update setting", scaleSet.ID)
+	}
 	return w.recordScaleSetID(entity, scaleSet.ID)
 }
 

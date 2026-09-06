@@ -254,3 +254,30 @@ func TestEnsureScaleSetInGitHubPreservesExistingIDMismatch(t *testing.T) {
 	var conflict *runnerErrors.ConflictError
 	assert.ErrorAs(t, err, &conflict)
 }
+
+func TestEnsureScaleSetRejectsIncompatibleRunnerSettings(t *testing.T) {
+	for _, desired := range []bool{false, true} {
+		for _, remote := range []bool{false, true} {
+			t.Run(fmt.Sprintf("local=%t/remote=%t", desired, remote), func(t *testing.T) {
+				scaleSet := testScaleSet(t)
+				scaleSet.DisableUpdate = desired
+				store := storeMocks.NewStore(t)
+				if desired == remote {
+					expectScaleSetIDUpdate(t, store, scaleSet, 42)
+				}
+				w := newScaleSetWorkerForTest(t, store, scaleSet, func(rw http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, http.MethodGet, r.Method)
+					fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1,"runnerSetting":{"disableUpdate":%t}}]}`, scaleSet.Name, remote)
+				})
+				err := w.ensureScaleSetInGitHub()
+				if desired != remote {
+					require.ErrorIs(t, err, &runnerErrors.ConflictError{})
+					assert.Zero(t, w.scaleSet.ScaleSetID)
+				} else {
+					require.NoError(t, err)
+					assert.Equal(t, 42, w.scaleSet.ScaleSetID)
+				}
+			})
+		}
+	}
+}

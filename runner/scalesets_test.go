@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	"github.com/cloudbase/garm/auth"
 	storeMocks "github.com/cloudbase/garm/database/common/mocks"
@@ -40,6 +41,7 @@ const testScaleSetActionsToken = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDk5MzYwMDB9."
 
 type scaleSetAPI struct {
 	server         *httptest.Server
+	disableUpdate  bool
 	existing       bool
 	createConflict bool
 	createRequests int
@@ -74,7 +76,7 @@ func (a *scaleSetAPI) handleScaleSets(t *testing.T, w http.ResponseWriter, r *ht
 	switch r.Method {
 	case http.MethodGet:
 		if a.existing {
-			_, _ = w.Write([]byte(`{"count":1,"value":[{"id":42,"name":"existing","runnerGroupId":1}]}`))
+			_, _ = fmt.Fprintf(w, `{"count":1,"value":[{"id":42,"name":"existing","runnerGroupId":1,"runnerSetting":{"disableUpdate":%t}}]}`, a.disableUpdate)
 			return
 		}
 		_, _ = w.Write([]byte(`{"count":0,"value":[]}`))
@@ -96,7 +98,7 @@ func (a *scaleSetAPI) handleScaleSets(t *testing.T, w http.ResponseWriter, r *ht
 	}
 }
 
-func newScaleSetRunner(t *testing.T, api *scaleSetAPI, createErr error) (*Runner, context.Context) {
+func newScaleSetRunner(t *testing.T, api *scaleSetAPI, createErr error, expectCreate bool) (*Runner, context.Context) {
 	t.Helper()
 
 	ctx := auth.GetAdminContext(context.Background())
@@ -124,9 +126,11 @@ func newScaleSetRunner(t *testing.T, api *scaleSetAPI, createErr error) (*Runner
 		OSType:    commonParams.Linux,
 		ForgeType: params.GithubEndpointType,
 	}, nil).Once()
-	store.EXPECT().CreateEntityScaleSet(ctx, entity, mock.MatchedBy(func(param params.CreateScaleSetParams) bool {
-		return param.ScaleSetID == 42
-	})).Return(params.ScaleSet{ScaleSetID: 42}, createErr).Once()
+	if expectCreate {
+		store.EXPECT().CreateEntityScaleSet(ctx, entity, mock.MatchedBy(func(param params.CreateScaleSetParams) bool {
+			return param.ScaleSetID == 42
+		})).Return(params.ScaleSet{ScaleSetID: 42}, createErr).Once()
+	}
 
 	return &Runner{store: store}, ctx
 }
@@ -144,7 +148,7 @@ func createExistingScaleSet(t *testing.T, runner *Runner, ctx context.Context) (
 func TestCreateEntityScaleSetAdoptsExistingScaleSet(t *testing.T) {
 	api := newScaleSetAPI(t)
 	api.existing = true
-	runner, ctx := newScaleSetRunner(t, api, nil)
+	runner, ctx := newScaleSetRunner(t, api, nil, true)
 
 	scaleSet, err := createExistingScaleSet(t, runner, ctx)
 	require.NoError(t, err)
@@ -155,7 +159,7 @@ func TestCreateEntityScaleSetAdoptsExistingScaleSet(t *testing.T) {
 func TestCreateEntityScaleSetRecoversCreateConflict(t *testing.T) {
 	api := newScaleSetAPI(t)
 	api.createConflict = true
-	runner, ctx := newScaleSetRunner(t, api, nil)
+	runner, ctx := newScaleSetRunner(t, api, nil, true)
 
 	scaleSet, err := createExistingScaleSet(t, runner, ctx)
 	require.NoError(t, err)
@@ -166,7 +170,7 @@ func TestCreateEntityScaleSetRecoversCreateConflict(t *testing.T) {
 func TestCreateEntityScaleSetDoesNotDeleteAdoptedScaleSet(t *testing.T) {
 	api := newScaleSetAPI(t)
 	api.existing = true
-	runner, ctx := newScaleSetRunner(t, api, errors.New("database unavailable"))
+	runner, ctx := newScaleSetRunner(t, api, errors.New("database unavailable"), true)
 
 	_, err := createExistingScaleSet(t, runner, ctx)
 	require.Error(t, err)
@@ -175,10 +179,36 @@ func TestCreateEntityScaleSetDoesNotDeleteAdoptedScaleSet(t *testing.T) {
 
 func TestCreateEntityScaleSetDeletesCreatedScaleSetOnDatabaseFailure(t *testing.T) {
 	api := newScaleSetAPI(t)
-	runner, ctx := newScaleSetRunner(t, api, errors.New("database unavailable"))
+	runner, ctx := newScaleSetRunner(t, api, errors.New("database unavailable"), true)
 
 	_, err := createExistingScaleSet(t, runner, ctx)
 	require.Error(t, err)
 	require.Equal(t, 1, api.createRequests)
 	require.Equal(t, 1, api.deleteRequests)
+}
+
+func TestCreateScaleSetRejectsIncompatibleRunnerSettings(t *testing.T) {
+	for _, desired := range []bool{false, true} {
+		for _, remote := range []bool{false, true} {
+			for _, conflict := range []bool{false, true} {
+				t.Run(fmt.Sprintf("local=%t/remote=%t/create-conflict=%t", desired, remote, conflict), func(t *testing.T) {
+					api := newScaleSetAPI(t)
+					api.existing = !conflict
+					api.createConflict = conflict
+					api.disableUpdate = remote
+					runner, ctx := newScaleSetRunner(t, api, nil, desired == remote)
+					templateID := uint(1)
+					_, err := runner.CreateEntityScaleSet(ctx, params.ForgeEntityTypeRepository, "entity-id", params.CreateScaleSetParams{
+						Name: "existing", OSType: commonParams.Linux, TemplateID: &templateID, DisableUpdate: desired,
+					})
+					if desired != remote {
+						require.ErrorIs(t, err, &runnerErrors.ConflictError{})
+					} else {
+						require.NoError(t, err)
+					}
+					require.Zero(t, api.deleteRequests)
+				})
+			}
+		}
+	}
 }
