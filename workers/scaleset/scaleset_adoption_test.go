@@ -128,11 +128,24 @@ func TestEnsureScaleSetInGitHubAdoptsExistingScaleSet(t *testing.T) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		assert.Equal(t, "1", r.URL.Query().Get("runnerGroupId"))
 		assert.Equal(t, scaleSet.Name, r.URL.Query().Get("name"))
-		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1}]}`, scaleSet.Name)
+		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1}]}`, scaleSet.Name, scaleSet.Name)
 	})
 
 	require.NoError(t, w.ensureScaleSetInGitHub())
 	assert.Equal(t, 42, w.scaleSet.ScaleSetID)
+}
+
+func TestEnsureScaleSetInGitHubRejectsDifferentLabels(t *testing.T) {
+	scaleSet := testScaleSet(t)
+	store := storeMocks.NewStore(t)
+	w := newScaleSetWorkerForTest(t, store, scaleSet, func(rw http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1,"labels":[{"name":"other"}]}]}`, scaleSet.Name)
+	})
+	err := w.ensureScaleSetInGitHub()
+	require.ErrorIs(t, err, &runnerErrors.ConflictError{})
+	require.ErrorContains(t, err, "labels")
+	assert.Zero(t, w.scaleSet.ScaleSetID)
 }
 
 func TestEnsureScaleSetInGitHubEscapesLookupName(t *testing.T) {
@@ -144,7 +157,7 @@ func TestEnsureScaleSetInGitHubEscapesLookupName(t *testing.T) {
 	w := newScaleSetWorkerForTest(t, store, scaleSet, func(rw http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		assert.Equal(t, scaleSet.Name, r.URL.Query().Get("name"))
-		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1}]}`, scaleSet.Name)
+		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1}]}`, scaleSet.Name, scaleSet.Name)
 	})
 
 	require.NoError(t, w.ensureScaleSetInGitHub())
@@ -162,7 +175,7 @@ func TestEnsureScaleSetInGitHubFallsBackToRunnerGroupListWithoutRunnerGroupID(t 
 			_, _ = rw.Write([]byte(`{"count":0,"value":[]}`))
 			return
 		}
-		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q}]}`, scaleSet.Name)
+		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q}]}`, scaleSet.Name, scaleSet.Name)
 	})
 
 	require.NoError(t, w.ensureScaleSetInGitHub())
@@ -179,7 +192,7 @@ func TestEnsureScaleSetInGitHubRecoversCreateConflict(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			if createAttempted && r.URL.Query().Get("name") == "" {
-				_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1}]}`, scaleSet.Name)
+				_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1}]}`, scaleSet.Name, scaleSet.Name)
 				return
 			}
 			_, _ = rw.Write([]byte(`{"count":0,"value":[]}`))
@@ -209,7 +222,7 @@ func TestEnsureScaleSetInGitHubPreservesUnrelatedBadRequest(t *testing.T) {
 			return
 		}
 		if createAttempted {
-			_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1}]}`, scaleSet.Name)
+			_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1}]}`, scaleSet.Name, scaleSet.Name)
 			return
 		}
 		_, _ = rw.Write([]byte(`{"count":0,"value":[]}`))
@@ -246,7 +259,7 @@ func TestEnsureScaleSetInGitHubPreservesExistingIDMismatch(t *testing.T) {
 	scaleSet.ScaleSetID = 7
 	store := storeMocks.NewStore(t)
 	w := newScaleSetWorkerForTest(t, store, scaleSet, func(rw http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1}]}`, scaleSet.Name)
+		_, _ = fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1}]}`, scaleSet.Name, scaleSet.Name)
 	})
 
 	err := w.ensureScaleSetInGitHub()
@@ -267,7 +280,7 @@ func TestEnsureScaleSetRejectsIncompatibleRunnerSettings(t *testing.T) {
 				}
 				w := newScaleSetWorkerForTest(t, store, scaleSet, func(rw http.ResponseWriter, r *http.Request) {
 					assert.Equal(t, http.MethodGet, r.Method)
-					fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"name":%q,"runnerGroupId":1,"runnerSetting":{"disableUpdate":%t}}]}`, scaleSet.Name, remote)
+					fmt.Fprintf(rw, `{"count":1,"value":[{"id":42,"labels":[{"name":%q}],"name":%q,"runnerGroupId":1,"runnerSetting":{"disableUpdate":%t}}]}`, scaleSet.Name, scaleSet.Name, remote)
 				})
 				err := w.ensureScaleSetInGitHub()
 				if desired != remote {

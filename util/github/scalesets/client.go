@@ -45,6 +45,7 @@ const requestTimeout = 60 * time.Second
 // black-holed connection cannot hold a poll open forever. GitHub's own
 // runner polls the same broker with a 100 second client timeout.
 const longPollRequestTimeout = 100 * time.Second
+
 // ErrRunnerScaleSetExists is returned when creating an existing runner scale set.
 var ErrRunnerScaleSetExists = errors.New("runner scale set already exists")
 

@@ -42,6 +42,7 @@ const testScaleSetActionsToken = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDk5MzYwMDB9."
 type scaleSetAPI struct {
 	server         *httptest.Server
 	disableUpdate  bool
+	labels         []params.Label
 	existing       bool
 	createConflict bool
 	createRequests int
@@ -51,7 +52,7 @@ type scaleSetAPI struct {
 func newScaleSetAPI(t *testing.T) *scaleSetAPI {
 	t.Helper()
 
-	api := new(scaleSetAPI)
+	api := &scaleSetAPI{labels: []params.Label{{Name: "existing", Type: "System"}}}
 	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/rate_limit":
@@ -76,7 +77,9 @@ func (a *scaleSetAPI) handleScaleSets(t *testing.T, w http.ResponseWriter, r *ht
 	switch r.Method {
 	case http.MethodGet:
 		if a.existing {
-			_, _ = fmt.Fprintf(w, `{"count":1,"value":[{"id":42,"name":"existing","runnerGroupId":1,"runnerSetting":{"disableUpdate":%t}}]}`, a.disableUpdate)
+			labels, err := json.Marshal(a.labels)
+			require.NoError(t, err)
+			_, _ = fmt.Fprintf(w, `{"count":1,"value":[{"id":42,"name":"existing","runnerGroupId":1,"labels":%s,"runnerSetting":{"disableUpdate":%t}}]}`, labels, a.disableUpdate)
 			return
 		}
 		_, _ = w.Write([]byte(`{"count":0,"value":[]}`))
@@ -154,6 +157,21 @@ func TestCreateEntityScaleSetAdoptsExistingScaleSet(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 42, scaleSet.ScaleSetID)
 	require.Zero(t, api.createRequests)
+}
+
+func TestCreateEntityScaleSetRejectsDifferentLabels(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(fmt.Sprint(conflict), func(t *testing.T) {
+			api := newScaleSetAPI(t)
+			api.existing, api.createConflict = !conflict, conflict
+			api.labels = []params.Label{{Name: "other"}}
+			runner, ctx := newScaleSetRunner(t, api, nil, false)
+			_, err := createExistingScaleSet(t, runner, ctx)
+			require.ErrorIs(t, err, &runnerErrors.ConflictError{})
+			require.ErrorContains(t, err, "labels")
+			require.Zero(t, api.deleteRequests)
+		})
+	}
 }
 
 func TestCreateEntityScaleSetRecoversCreateConflict(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm/params"
@@ -31,6 +32,31 @@ const (
 	runnerEndpoint   = "_apis/distributedtask/pools/0/agents"
 	scaleSetEndpoint = "_apis/runtime/runnerscalesets"
 )
+
+// ValidateAdoption checks the settings GARM will rely on when adopting a scale set.
+func ValidateAdoption(existing, desired params.RunnerScaleSet) error {
+	if existing.RunnerSetting.DisableUpdate != desired.RunnerSetting.DisableUpdate {
+		return runnerErrors.NewConflictError("existing scale set %d has a different disable_update setting", existing.ID)
+	}
+	labelNames := func(labels []params.Label) map[string]struct{} {
+		names := make(map[string]struct{}, len(labels))
+		for _, label := range labels {
+			names[strings.ToLower(label.Name)] = struct{}{}
+		}
+		return names
+	}
+	// GitHub routes jobs by case-insensitive label names, independent of order.
+	want, have := labelNames(desired.Labels), labelNames(existing.Labels)
+	if len(want) != len(have) {
+		return runnerErrors.NewConflictError("existing scale set %d has different labels", existing.ID)
+	}
+	for name := range want {
+		if _, ok := have[name]; !ok {
+			return runnerErrors.NewConflictError("existing scale set %d has different labels", existing.ID)
+		}
+	}
+	return nil
+}
 
 func matchesRunnerScaleSet(scaleSet params.RunnerScaleSet, runnerGroupID int, name string) bool {
 	return scaleSet.Name == name && (scaleSet.RunnerGroupID == 0 || scaleSet.RunnerGroupID == int64(runnerGroupID))

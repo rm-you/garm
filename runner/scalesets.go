@@ -282,8 +282,10 @@ func (r *Runner) CreateEntityScaleSet(ctx context.Context, entityType params.For
 		}
 	}
 
-	if !created && param.DisableUpdate != runnerScaleSet.RunnerSetting.DisableUpdate {
-		return params.ScaleSet{}, runnerErrors.NewConflictError("existing scale set %d has a different disable_update setting", runnerScaleSet.ID)
+	if !created {
+		if err := scalesets.ValidateAdoption(runnerScaleSet, *createParam); err != nil {
+			return params.ScaleSet{}, err
+		}
 	}
 
 	defer func() {
