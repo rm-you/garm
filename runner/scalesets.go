@@ -206,7 +206,7 @@ func (r *Runner) UpdateScaleSetByID(ctx context.Context, scaleSetID uint, param 
 	return newScaleSet, nil
 }
 
-func (r *Runner) CreateEntityScaleSet(ctx context.Context, entityType params.ForgeEntityType, entityID string, param params.CreateScaleSetParams) (scaleSetRet params.ScaleSet, err error) {
+func (r *Runner) CreateEntityScaleSet(ctx context.Context, entityType params.ForgeEntityType, entityID string, param params.CreateScaleSetParams) (params.ScaleSet, error) {
 	if !auth.IsAdmin(ctx) {
 		return params.ScaleSet{}, runnerErrors.ErrUnauthorized
 	}
@@ -288,18 +288,13 @@ func (r *Runner) CreateEntityScaleSet(ctx context.Context, entityType params.For
 		}
 	}
 
-	defer func() {
-		if err != nil && created {
-			if innerErr := scalesetCli.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); innerErr != nil {
-				slog.With(slog.Any("error", innerErr)).ErrorContext(ctx, "failed to cleanup scale set")
-			}
-		}
-	}()
 	param.ScaleSetID = runnerScaleSet.ID
 
 	scaleSet, err := r.store.CreateEntityScaleSet(ctx, entity, param)
 	if err != nil {
-		return params.ScaleSet{}, fmt.Errorf("error creating scale set: %w", err)
+		// Another request may have adopted it, or the insert may have committed
+		// before returning an error. Leave it available for adoption on retry.
+		return params.ScaleSet{}, fmt.Errorf("error creating scale set (GitHub scale set %d retained): %w", runnerScaleSet.ID, err)
 	}
 
 	return scaleSet, nil

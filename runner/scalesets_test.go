@@ -95,6 +95,7 @@ func (a *scaleSetAPI) handleScaleSets(t *testing.T, w http.ResponseWriter, r *ht
 		_, _ = w.Write([]byte(`{"id":42,"name":"existing","runnerGroupId":1}`))
 	case http.MethodDelete:
 		a.deleteRequests++
+		a.existing = false
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		t.Errorf("unexpected scale-set request: %s", r.Method)
@@ -195,14 +196,20 @@ func TestCreateEntityScaleSetDoesNotDeleteAdoptedScaleSet(t *testing.T) {
 	require.Zero(t, api.deleteRequests)
 }
 
-func TestCreateEntityScaleSetDeletesCreatedScaleSetOnDatabaseFailure(t *testing.T) {
+func TestCreateEntityScaleSetRetainsCreatedScaleSetForRetry(t *testing.T) {
 	api := newScaleSetAPI(t)
 	runner, ctx := newScaleSetRunner(t, api, errors.New("database unavailable"), true)
 
 	_, err := createExistingScaleSet(t, runner, ctx)
 	require.Error(t, err)
 	require.Equal(t, 1, api.createRequests)
-	require.Equal(t, 1, api.deleteRequests)
+	require.Zero(t, api.deleteRequests)
+
+	retry, retryCtx := newScaleSetRunner(t, api, nil, true)
+	scaleSet, err := createExistingScaleSet(t, retry, retryCtx)
+	require.NoError(t, err)
+	require.Equal(t, 42, scaleSet.ScaleSetID)
+	require.Equal(t, 1, api.createRequests)
 }
 
 func TestCreateScaleSetRejectsIncompatibleRunnerSettings(t *testing.T) {
