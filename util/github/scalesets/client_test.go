@@ -17,6 +17,7 @@ package scalesets
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -150,4 +151,32 @@ func TestDoMapsOtherStatuses(t *testing.T) {
 	}
 
 	require.NoError(t, doAgainstStatus(t, http.StatusOK, "ok"))
+}
+
+func TestDoRecognizesNestedRunnerScaleSetExistsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"Bad Request","details":"error creating runner scale set: failed: \"{\\\"typeName\\\":\\\"GitHub.Actions.Runtime.WebApi.RunnerScaleSetExistsException, GitHub.Actions.Runtime.WebApi\\\"}\""}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &ScaleSetClient{httpClient: server.Client()}
+	req, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Do(req)
+	if !errors.Is(err, ErrRunnerScaleSetExists) {
+		t.Fatalf("expected ErrRunnerScaleSetExists, got %v", err)
+	}
+	if !errors.Is(err, runnerErrors.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestRunnerScaleSetExistsTypeRequiresExactName(t *testing.T) {
+	if isRunnerScaleSetExistsType("NotRunnerScaleSetExistsException") {
+		t.Fatal("unexpected duplicate classification")
+	}
 }
