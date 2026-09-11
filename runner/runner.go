@@ -281,6 +281,9 @@ func (p *poolManagerCtrl) GetForgeInstancePoolManagers() (map[string]common.Pool
 
 type Runner struct {
 	mux sync.Mutex
+	// scaleSetCreateMux keeps two requests from adopting the same GitHub
+	// scale set at the same time.
+	scaleSetCreateMux sync.Mutex
 
 	config      config.Config
 	ctx         context.Context
